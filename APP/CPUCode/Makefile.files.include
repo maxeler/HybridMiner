@@ -1,0 +1,5 @@
+#
+# This file is managed by MaxIDE. Do NOT change.
+#
+HEADERS:= bitcoin/bitcoin.h common/data_struct.h common/dfe.h common/gbuf.h common/json_wrapper.h common/logging.h common/sha2.h common/timer.h common/worker.h scrypt/scrypt.h 
+SOURCES:= bitcoin/bitcoin.c common/dfe.c common/gbuf.c common/json_wrapper.c common/logging.c common/sha2.c main.c scrypt/scrypt.c 

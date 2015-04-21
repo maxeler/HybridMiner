@@ -1,0 +1,166 @@
+/*********************************************************************
+ * Maxeler Technologies : Hybrid Coin Miner                          *
+ *                                                                   *
+ * Version: 1.0                                                      *
+ * Date:    13th March 2014                                          *
+ *                                                                   *
+ * DFE code source file                                              *
+ *                                                                   *
+ *********************************************************************/
+
+package com.maxeler.applibrary.coinminer.bitcoinminer;
+
+import com.maxeler.maxcompiler.v0.utils.MathUtils;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelLib;
+import com.maxeler.maxcompiler.v2.kernelcompiler.SMIO;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmInput;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmOutput;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmStateEnum;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmStateValue;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmValue;
+import com.maxeler.maxcompiler.v2.statemachine.kernel.KernelStateMachine;
+import com.maxeler.maxcompiler.v2.statemachine.types.DFEsmValueType;
+
+class Control extends KernelStateMachine {
+
+	private final static String BASE         = "base";
+	private final static String LENGTH       = "length";
+	private final static String NONCE        = "nonce";
+	private final static String EN_COMPUTE   = "en_compute";
+	private final static String EN_OUTPUT    = "en_output";
+	private final static String I_PIPE       = "iPipe";
+	private final static String I_READ       = "iRead";
+
+	/*
+	 * Nonce-space is nominally 32-bit.  However, we always need to round the
+	 * count up to a multiple of num-pipes, and 2^32 may not be an exact
+	 * multiple.  Therefore we need a slightly larger range, hence the
+	 * "ext" type.
+	 */
+	public final static DFEsmValueType TYPE_NONCE = dfeUInt(32);
+	public final static DFEsmValueType TYPE_NONCE_EXT = dfeUInt(33);
+	public final DFEsmValueType type_iPipe;
+	public final DFEsmValueType type_iRead;
+
+
+
+	private enum Modes {
+		COMPUTE,
+		OUTPUT
+	}
+
+
+	private final DFEsmStateEnum<Modes>		mode;
+	private final DFEsmStateValue			nonce;
+	private final DFEsmStateValue			iPipe;
+	private final DFEsmStateValue			iRead;
+
+	private final DFEsmInput				i_base;	// Inclusive
+	private final DFEsmInput				i_length;
+
+	private final DFEsmOutput				o_nonce;
+	private final DFEsmOutput				o_enCompute;
+	private final DFEsmOutput				o_enOutput;
+	private final DFEsmOutput				o_iPipe;
+	private final DFEsmOutput				o_iRead;
+
+	private final int numPipes;
+	private final int numRecordsPerPipe;
+
+	public final Outputs outputs;
+
+
+
+	public Control(KernelLib owner, int numPipes, int numRecordsPerPipe) {
+		super(owner);
+		this.numPipes          = numPipes;
+		this.numRecordsPerPipe = numRecordsPerPipe;
+		this.type_iPipe        = dfeUInt(Math.max(1, MathUtils.bitsToAddress(numPipes)));
+		this.type_iRead        = dfeUInt(MathUtils.bitsToAddress(numRecordsPerPipe));
+
+		// State
+		mode = state.enumerated(Modes.class, Modes.COMPUTE);
+		nonce = state.value(TYPE_NONCE_EXT, 0);
+		iPipe = state.value(type_iPipe,  0);
+		iRead = state.value(type_iRead,  0);
+
+		// Inputs
+		i_base   = io.scalarInput(BASE, TYPE_NONCE_EXT);
+		i_length = io.scalarInput(LENGTH, TYPE_NONCE_EXT);
+
+		// Outputs
+		o_nonce     = io.output(NONCE, TYPE_NONCE);
+		o_enCompute = io.output(EN_COMPUTE, dfeBool());
+		o_enOutput  = io.output(EN_OUTPUT, dfeBool());
+		o_iPipe     = io.output(I_PIPE, type_iPipe);
+		o_iRead     = io.output(I_READ, type_iRead);
+
+		outputs = new Outputs(owner);
+	}
+
+
+	public class Outputs extends KernelLib {
+		final DFEVar   nonce;
+		final DFEVar   enCompute;
+		final DFEVar   enOutput;
+		final DFEVar   iPipe;
+		final DFEVar   iRead;
+
+		private Outputs(KernelLib owner) {
+			super(owner);
+			SMIO sm = addStateMachine("Control", Control.this);
+			nonce     = sm.getOutput(Control.NONCE);
+			enCompute = sm.getOutput(Control.EN_COMPUTE);
+			enOutput  = sm.getOutput(Control.EN_OUTPUT);
+			iPipe     = sm.getOutput(Control.I_PIPE);
+			iRead     = sm.getOutput(Control.I_READ);
+		}
+	}
+
+
+	@Override
+	protected void nextState() {
+		IF (io.isInputValid()) {
+			SWITCH (mode) {
+				CASE (Modes.COMPUTE) {
+					DFEsmValue next = nonce + numPipes;
+					IF (next === i_length) {
+						nonce.next <== 0;
+						mode.next  <== Modes.OUTPUT;
+					} ELSE {
+						nonce.next <== next;
+					}
+				}
+
+				CASE (Modes.OUTPUT) {
+					iRead.next <== iRead + 1;
+
+					IF (iRead === numRecordsPerPipe-1) {
+						iRead.next <== 0;
+						iPipe.next <== iPipe + 1;
+
+						IF (iPipe === numPipes-1) {
+							iPipe.next <== 0;
+							mode.next  <== Modes.COMPUTE;
+						}
+					}
+
+				}
+			}
+		}
+	}
+
+
+	@Override
+	protected void outputFunction() {
+		o_nonce     <== (nonce + i_base).cast(TYPE_NONCE);
+		o_enCompute <== (mode === Modes.COMPUTE);
+		o_enOutput  <== (mode === Modes.OUTPUT);
+		o_iPipe     <== iPipe;
+		o_iRead     <== iRead;
+	}
+
+
+
+}

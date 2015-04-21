@@ -1,0 +1,146 @@
+/*********************************************************************
+ * Maxeler Technologies : Hybrid Coin Miner                          *
+ *                                                                   *
+ * Version: 1.0                                                      *
+ * Date:    13th March 2014                                          *
+ *                                                                   *
+ * DFE code source file                                              *
+ *                                                                   *
+ *********************************************************************/
+
+package com.maxeler.applibrary.coinminer;
+
+import com.maxeler.applibrary.coinminer.bitcoinminer.BitcoinMinerKernel;
+import com.maxeler.applibrary.coinminer.scryptminer.ScryptKernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelConfiguration;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler._KernelConfiguration;
+import com.maxeler.maxcompiler.v2.managers.BuildConfig;
+import com.maxeler.maxcompiler.v2.managers.BuildConfig.Effort;
+import com.maxeler.maxcompiler.v2.managers.BuildConfig.Level;
+import com.maxeler.maxcompiler.v2.managers.custom.CustomManager;
+import com.maxeler.maxcompiler.v2.managers.custom.ManagerClock;
+import com.maxeler.maxcompiler.v2.managers.custom.blocks.KernelBlock;
+import com.maxeler.maxcompiler.v2.managers.custom.stdlib.DebugLevel;
+import com.maxeler.maxcompiler.v2.managers.custom.stdlib.MemoryControllerConfig;
+import com.maxeler.maxcompiler.v2.managers.engine_interfaces.CPUTypes;
+import com.maxeler.maxcompiler.v2.managers.engine_interfaces.EngineInterface;
+import com.maxeler.maxcompiler.v2.managers.engine_interfaces.InterfaceParam;
+import com.maxeler.photon.configuration.PhotonKernelConfiguration;
+
+public final class HybridMinerManager extends CustomManager {
+
+	private final HybridMinerEngineParameters m_params;
+	private KernelConfiguration m_kernelConfig;
+
+
+	public HybridMinerManager(HybridMinerEngineParameters params) {
+		super(params);
+		m_params = params;
+
+		setConfiguration();
+		addModes();
+		setDesign();
+		addMaxFileConstants();
+	}
+
+
+	private void setDesign() {
+		KernelParameters kernelParams = makeKernelParameters(
+				BitcoinMinerKernel.class.getSimpleName(), m_kernelConfig);
+		if(m_params.getNumPipes() > 0){
+			KernelBlock bitcoinKernel = addKernel(new BitcoinMinerKernel(kernelParams, m_params));
+			addStreamToCPU("toHost_bitcoin") <== bitcoinKernel.getOutput("output");
+
+			ManagerClock bitcoinClock = generateStreamClock("bitcoin", m_params.getBitcoinFreq());
+			bitcoinKernel.setClock(bitcoinClock);
+
+		}
+		if(m_params.getScryptNumPipes() > 0){
+			KernelBlock scryptKernel = addKernel(new ScryptKernel(makeKernelParameters(ScryptKernel.class.getSimpleName()), m_params));
+			scryptKernel.getInput("input") <== addStreamFromCPU("fromHost_scrypt");
+			addStreamToCPU("toHost_scrypt") <== scryptKernel.getOutput("output");
+			ManagerClock scryptClock = generateStreamClock("scrypt", m_params.getScryptFreq());
+			scryptKernel.setClock(scryptClock);
+		}
+
+
+	}
+
+
+
+	private void setConfiguration() {
+		MemoryControllerConfig memConfig = new MemoryControllerConfig();
+		config.setMemoryControllerConfig(memConfig);
+
+		config.setDefaultStreamClockFrequency(m_params.getStreamFrequency());
+		DebugLevel debugLevel = new DebugLevel();
+		debugLevel.setHasStreamStatus(m_params.getHasStreamStatus());
+		debug.setDebugLevel(debugLevel);
+
+		m_kernelConfig = getCurrentKernelConfig();
+		/* TriAddExtractionPass #4857 */
+		m_kernelConfig.optimization.setTriAddsEnabled(m_params.getTriAdds());
+		m_kernelConfig.optimization.setCEReplicationNumPartitions(m_params.getCEReplication());
+		m_kernelConfig.optimization.setUseGlobalClockBuffer(m_params.getIsBuffGce());
+		if (m_params.getFifoThreshold() > 0) {
+			m_kernelConfig.optimization.setFIFOImplementationBRAMThreshold(m_params.getFifoThreshold());
+		}
+		PhotonKernelConfiguration pkc = _KernelConfiguration.getPhotonKernelConfig(getCurrentKernelConfig());
+		pkc.optimizations().setBetterRegisteringEnabled(false);
+		pkc.optimizations().setMultiCycleResetEnabled(m_params.getIsMultiCycleReset());
+		pkc.setClockPhasePartitioningEnabled(m_params.getIsPhaseClocks());
+	}
+
+
+	private void addModes() {
+		createSLiCinterface(createDefaultMode());
+	}
+
+
+	private EngineInterface createDefaultMode() {
+		EngineInterface mode = new EngineInterface("default");
+		if(m_params.getScryptNumPipes() > 0){
+			InterfaceParam n = mode.addParam("N", CPUTypes.INT32, "Number of invocations, where each invocation computes " + (m_params.getCslow()*m_params.getScryptNumPipes()) + " Scrypts");
+			mode.setScalar("ScryptKernel", "nmax", n);
+			mode.setTicks("ScryptKernel", n*m_params.getCslow()*2*ScryptKernel.iters + (m_params.getScryptNumPipes()-1)*m_params.getCslow());
+			mode.setStream("fromHost_scrypt", CPUTypes.UINT32, n*128*(m_params.getScryptNumPipes()*m_params.getCslow()));
+			mode.setStream("toHost_scrypt", CPUTypes.UINT32, n*128*(m_params.getScryptNumPipes()*m_params.getCslow()));
+		}
+		return mode;
+	}
+
+
+	private void addMaxFileConstants() {
+		addMaxFileConstant("Bitcoin_numPipes", m_params.getNumPipes());
+		addMaxFileConstant("Bitcoin_numRecordsPerPipe", m_params.getNumRecordsPerPipe());
+		addMaxFileConstant("Bitcoin_Frequency", m_params.getBitcoinFreq());
+		addMaxFileConstantFlag("Bitcoin_isRamBased", 1);
+		addMaxFileConstant("Scrypt_NumPipes", m_params.getScryptNumPipes());
+		addMaxFileConstant("Scrypt_Cslow", m_params.getCslow());
+		addMaxFileConstant("Scrypt_Frequency", m_params.getScryptFreq());
+		addMaxFileConstant("Scrypt_ComputeUnit", m_params.getCslow()*m_params.getScryptNumPipes());
+		addMaxFileConstant("Scrypt_Iterations", ScryptKernel.iters);
+	}
+
+
+	private static BuildConfig createBuildConfig(HybridMinerEngineParameters m_params) {
+		BuildConfig buildConfig = new BuildConfig(Level.FULL_BUILD);
+		buildConfig.setBuildEffort(Effort.VERY_HIGH);
+		buildConfig.setEnableTimingAnalysis(true);
+		buildConfig.setMPPRCostTableSearchRange(m_params.getMPPRStartCT(), m_params.getMPPREndCT());
+		buildConfig.setMPPRParallelism(m_params.getMPPRThreads());
+		buildConfig.setMPPRRetryNearMissesThreshold(m_params.getMPPRRetryThreshold());
+		buildConfig.setMPPRContinueAfterMeetingTiming(m_params.getMPPRContinue());
+		return buildConfig;
+	}
+
+
+	public static void main(String[] args) {
+		HybridMinerEngineParameters m_params = new HybridMinerEngineParameters(args);
+		HybridMinerManager manager = new HybridMinerManager(m_params);
+
+		manager.setBuildConfig(createBuildConfig(m_params));
+		manager.build();
+	}
+}

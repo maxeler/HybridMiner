@@ -1,0 +1,336 @@
+/*********************************************************************
+ * Maxeler Technologies : Hybrid Coin Miner                          *
+ *                                                                   *
+ * Version: 1.0                                                      *
+ * Date:    13th March 2014                                          *
+ *                                                                   *
+ * DFE code source file                                              *
+ *                                                                   *
+ *********************************************************************/
+
+package com.maxeler.applibrary.coinminer.scryptminer;
+
+import com.maxeler.applibrary.coinminer.HybridMinerEngineParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.SMIO;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.Reductions;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Count.Counter;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Count.WrapMode;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.CounterChain;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.KernelObject;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+public class ScryptKernel extends Kernel {
+
+	private static final DFEType type = dfeUInt(32);
+	private static final DFEVectorType<DFEVar> arraytype = new DFEVectorType<DFEVar>(type, 32);
+	protected final int cslow;
+	protected final int numpipes;
+	public static final int iters = 1024;
+	protected int pipelineIdx = 0;
+
+	@SuppressWarnings("unchecked")
+	public ScryptKernel(KernelParameters parameters, HybridMinerEngineParameters params) {
+		super(parameters);
+		stream.suppressOffsetVectorWarnings();
+
+		numpipes = params.getScryptNumPipes();
+		cslow = params.getCslow();
+
+		// This counter enables the pipes to start staggered from each other.
+		int startupMax = cslow*numpipes+2;
+		Counter startupCounter = control.count.makeCounter(control.count.makeParams(MathUtils.bitsToRepresent(startupMax)).withMax(startupMax).withWrapMode(WrapMode.STOP_AT_MAX));
+		DFEVar startupCnt = startupCounter.getCount();
+
+		// These counters are used for controlling inputs and outputs
+		int computeCycles = cslow*iters*2;
+		CounterChain ctrl = control.count.makeCounterChain();
+		DFEVar nmax = io.scalarInput("nmax", dfeUInt(16));
+		DFEVar n = ctrl.addCounter(nmax+1, 1);
+		DFEVar cycleCount = ctrl.addCounter(computeCycles, 1);
+
+		// Single input for all pipes
+		DFEVar readInput = cycleCount<numpipes*cslow & n<nmax;
+		DFEVector<DFEVar> input = io.input("input", arraytype, readInput);
+
+		//debug.printf("n=%d, StartupCnt=%d, CycleCount=%d, readInput=%d, writeOutput=%d\n", n, startupCnt, cycleCount, readInput, writeOutput);
+//		debug.printf("input 0 = %08x\n", input[0]);
+		@SuppressWarnings("rawtypes")
+		DFEVector[] pipeOutput = new DFEVector[numpipes];
+		for (int i = 0; i < numpipes; i++) {
+			// Instantiate each compute pipe, with start-up delayed by correct number of cycles
+			pipeOutput[i] = pipe(input, startupCnt>=(cslow*i));
+		}
+
+		// Single output for all pipes
+		DFEVector<DFEVar> output = null;
+		DFEVar writeOutput = startupCnt>(numpipes*cslow) & cycleCount<(cslow*(numpipes-1)) | cycleCount>=(iters*cslow*2 - cslow);
+		if (numpipes==1) output = pipeOutput[0];
+		else {
+			CounterChain outputMuxCtr = control.count.makeCounterChain(writeOutput);
+			DFEVar pipeIdx = outputMuxCtr.addCounter(numpipes, 1);
+			DFEVar cslowIdx = outputMuxCtr.addCounter(cslow, 1);
+			cslowIdx.setReportOnUnused(false);
+			output = control.mux(pipeIdx, pipeOutput);
+			//debug.printf("Output words pipe0=%08x pipe1=%08x pipe2=%08x pipe3=%08x, selector=%d, output=%08x\n", pipeOutput[0][0], pipeOutput[1][0], pipeOutput[2][0] , pipeOutput[3][0], pipeIdx, output[0]);
+		}
+
+		io.output("output", output, arraytype, writeOutput);
+	}
+
+	protected DFEVector<DFEVar> pipe(DFEVector<DFEVar> input, DFEVar enable) {
+		optimization.pushPipeliningFactor(0.0);
+		pipelineIdx = 1; // Pipeline each pipe separately, first stage is number 1
+
+		CounterChain cnts = control.count.makeCounterChain(enable);
+		DFEVar phase = cnts.addCounter(2, 1);
+		DFEVar iteration = cnts.addCounter(iters, 1);
+		DFEVar cslowidx = null;
+		if (cslow>1) cslowidx = cnts.addCounter(cslow, 1);
+
+		DFEVar isStart = ~phase & iteration.eq(0);
+
+		//debug.printf("phase=%d, iteration=%d, cslowidx=%d, ioidx=%d, isStart=%d\n", phase, iteration, cslowidx, ioidx, isStart);
+
+		DFEVector<DFEVar> newX = arraytype.newInstance(this);
+		//debug.printf(phase.eq(0), "Writing to memory: addr %d, value %08x and %08x\n", address, X[0], X[31]);
+		DFEVar addressToAssign = dfeRawBits((MathUtils.bitsToAddress(cslow*iters))).newInstance(this);
+
+		DFEVector<DFEVar> X = isStart ? input : stream.offset(newX, -cslow);
+
+		DFEVector<DFEVar> Vout = memory(arraytype.getTotalBits(), cslow*iters, addressToAssign, ~phase, X);
+
+		//debug.printf(phase.eq(1), "Reading from memory: addr %d, value %08x\n", address, Vout[0]);
+
+		DFEVector<DFEVar> Xxored = phase ? X^Vout : X;
+		Xxored = pipeline(Xxored);
+		DFEVar[][] xSalsa = separate(Xxored);
+
+		xSalsa[0] = xor_salsa8(xSalsa[0], xSalsa[1]);
+		xSalsa[1] = xor_salsa8(xSalsa[1], xSalsa[0]);
+
+		DFEVector<DFEVar> postSalsa = combine(xSalsa);
+
+		newX <== postSalsa;
+
+		DFEVar address = phase ? X[16].cast(iteration.getType()) : iteration;
+		if (cslow>1) address = cslowidx.cat(address);
+		address = pipeline(address);
+		addressToAssign <== address.cast(addressToAssign.getType());
+
+		//debug.printf(phase.eq(1), "cslow=%d, iter=%d, X = %08x, Vout=%08x, XxorV=%08x, postSalsa=%08x, newX=%08x\n", cslowidx, iteration, X[0], Vout[0], Xxored[0], postSalsa[0], newX[0]);
+		optimization.popPipeliningFactor();
+
+		return postSalsa;
+	}
+
+	protected int memoryCount = 0;
+	@SuppressWarnings("unchecked")
+	protected DFEVector<DFEVar> memory(int width, int depth, DFEVar address, DFEVar write_en, DFEVector<DFEVar> data_in) {
+		final int MAX_DEPTH = 4096;
+
+		if (depth <= MAX_DEPTH)
+			return memoryBlock(width, depth, address, write_en, data_in);
+		else {
+			// Otherwise split into multiple RAMs
+			int totalRAMs = (int) Math.ceil((double)depth/(double)MAX_DEPTH);
+			int lastSize = depth - MAX_DEPTH*(totalRAMs-1);
+			int mainAddrBits = MathUtils.bitsToAddress(MAX_DEPTH);
+			int lastAddrBits = MathUtils.bitsToAddress(lastSize);
+			DFEVar whichBank = address.slice(mainAddrBits, address.getType().getTotalBits() - mainAddrBits);
+
+			@SuppressWarnings("rawtypes")
+			DFEVector bankOutputs[] = new DFEVector[totalRAMs];
+
+			for (int i = 0; i < totalRAMs; i++) {
+				DFEVar bankAddr = i!=(totalRAMs-1) ? address.slice(0, mainAddrBits) : address.slice(0, lastAddrBits);
+				DFEVar bankWrite = whichBank.eq(i) ? write_en : constant.var(0);
+				int bankDepth = i!=(totalRAMs-1) ? MAX_DEPTH : lastSize;
+				bankOutputs[i] = memoryBlock(width, bankDepth, bankAddr, bankWrite, data_in);
+			}
+
+			bankOutputs = pipeline(bankOutputs);
+			return control.mux(whichBank, bankOutputs);
+		}
+
+	}
+
+	protected DFEVector<DFEVar> memoryBlock(int width, int depth, DFEVar address, DFEVar write_en, DFEVector<DFEVar> data_in) {
+		DFEVar data_out = null;
+
+		if (getManager().isTargetSimulation()) {
+			//Fake memory with stream holds
+			DFEVar[] contents = new DFEVar[depth];
+			DFEVar din = data_in.pack();
+			// Write path
+			for (int i = 0; i < depth; i++)
+				contents[i] = Reductions.streamHold(din, address.eq(i) & write_en);
+			// Read path
+			data_out = control.mux(address, contents);
+		} else {
+			SMIO ram = addStateMachine("memory"+memoryCount, new MemoryBuffer(this, width, depth));
+			memoryCount++;
+
+			ram.connectInput("data_in", data_in.pack().cast(dfeUInt(1024)));
+			ram.connectInput("write_en", write_en);
+			ram.connectInput("address", address.cast(dfeUInt(address.getType().getTotalBits())));
+			data_out = ram.getOutput("data_out");
+		}
+
+		return arraytype.unpack(data_out);
+	}
+
+	public DFEVar ROTL(DFEVar a, int b) {
+		// Implemented in C as: ((a) << (b)) | ((a) >> (32 - (b)));
+		int n = a.getType().getTotalBits();
+		if (b == 0) return a;
+		DFEVar bottom = a.slice(0, n-b);
+		DFEVar top = a.slice(n-b, b);
+		DFEVar reconstructed = bottom.cat(top);
+		if (reconstructed.getType().getTotalBits() != n) System.out.printf("oops!");
+		return reconstructed.cast(a.getType());
+	}
+
+	public DFEVar[] xor_salsa8(DFEVar[] B, DFEVar[] Bx) {
+		DFEVar x[] = new DFEVar[16];
+		DFEVar t[] = new DFEVar[4];
+		int i;
+
+		for (i = 0; i < 16; i++)
+			x[i] = (B[i] ^= Bx[ i]);
+		x = pipeline(x);
+
+		for (i = 0; i < 8; i += 2) {
+			/* Operate on columns. */
+			t[0] = ROTL(x[0] + x[12], 7);	t[1] = ROTL(x[5] + x[1], 7);
+			t[2] = ROTL(x[10] + x[6], 7);	t[3] = ROTL(x[15] + x[11], 7);
+			t = pipeline(t);
+			x[4] ^= t[0]; 					x[9] ^= t[1];
+			x[14] ^= t[2]; 					x[3] ^= t[3];
+
+			t[0] = ROTL(x[4] + x[0], 9);	t[1] = ROTL(x[9] + x[5], 9);
+			t[2] = ROTL(x[14] + x[10], 9);	t[3] = ROTL(x[3] + x[15], 9);
+			t = pipeline(t);
+			x[8] ^= t[0]; 					x[13] ^= t[1];
+			x[2] ^= t[2]; 					x[7] ^= t[3];
+
+			t[0] = ROTL(x[8] + x[4], 13);	t[1] = ROTL(x[13] + x[9], 13);
+			t[2] = ROTL(x[2] + x[14], 13);  t[3] = ROTL(x[7] + x[3], 13);
+			t = pipeline(t);
+			x[12] ^= t[0]; 					x[1] ^= t[1];
+			x[6] ^= t[2]; 					x[11] ^= t[3];
+
+			t[0] = ROTL(x[12] + x[8], 18);  t[1] = ROTL(x[1] + x[13], 18);
+			t[2] = ROTL(x[6] + x[2], 18); 	t[3] = ROTL(x[11] + x[7], 18);
+			t = pipeline(t);
+			x[0] ^= t[0]; 					x[5] ^= t[1];
+			x[10] ^= t[2]; 					x[15] ^= t[3];
+
+			/* Operate on rows. */
+			t[0] = ROTL(x[0] + x[3], 7);	t[1] = ROTL(x[5] + x[4], 7);
+			t[2] = ROTL(x[10] + x[9], 7);	t[3] = ROTL(x[15] + x[14], 7);
+			t = pipeline(t);
+			x[1] ^= t[0]; 					x[6] ^= t[1];
+			x[11] ^= t[2]; 					x[12] ^= t[3];
+
+			t[0] = ROTL(x[1] + x[0], 9);	t[1] = ROTL(x[6] + x[5], 9);
+			t[2] = ROTL(x[11] + x[10], 9);	t[3] = ROTL(x[12] + x[15], 9);
+			t = pipeline(t);
+			x[2] ^= t[0]; 					x[7] ^= t[1];
+			x[8] ^= t[2]; 					x[13] ^= t[3];
+
+			t[0] = ROTL(x[2] + x[1], 13);	t[1] = ROTL(x[7] + x[6], 13);
+			t[2] = ROTL(x[8] + x[11], 13);	t[3] = ROTL(x[13] + x[12], 13);
+			t = pipeline(t);
+			x[3] ^= t[0]; 					x[4] ^= t[1];
+			x[9] ^= t[2]; 					x[14] ^= t[3];
+
+			t[0] = ROTL(x[3] + x[2], 18);	t[1] = ROTL(x[4] + x[7], 18);
+			t[2] = ROTL(x[9] + x[8], 18);	t[3] = ROTL(x[14] + x[13], 18);
+			t = pipeline(t);
+			x[0] ^= t[0]; 					x[5] ^= t[1];
+			x[10] ^= t[2]; 					x[15] ^= t[3];
+		}
+
+		for (i = 0; i < 16; i++)
+			B[i] += x[i];
+		B = pipeline(B);
+
+		return B;
+	}
+
+	protected DFEVar[] pipeline(DFEVar[] x) {
+		DFEVar y[];
+		int location = pipelineIdx++;
+		if (shouldPipeline(location)) { // Match condition
+			y = new DFEVar[x.length];
+			for (int i = 0; i < x.length; i++)
+				y[i] = optimization.pipeline(x[i]);
+		} else {
+			y = x;
+		}
+		return y;
+	}
+
+	protected<T extends KernelObject<T> > T pipeline(T x) {
+		int location = pipelineIdx++;
+		if (shouldPipeline(location))
+			return optimization.pipeline(x);
+		else return x;
+	}
+
+	protected<T extends KernelObject<T> > T[] pipeline(T[] x) {
+		int location = pipelineIdx++;
+		if (shouldPipeline(location))
+			for (int i = 0; i < x.length; i++)
+				x[i] = optimization.pipeline(x[i]);
+		return x;
+	}
+
+	public int getMaxPipelineStages() {
+		return pipelineIdx;
+	}
+
+	protected boolean shouldPipeline(int location) {
+		boolean doit = false;
+		// Some configurations are hand-optimized. Others are calculated automagically
+		if (cslow == 8) {
+			if (location==8 || location==18 || location==27 || location==36 ||
+				location==45 || location==54 ||	location==63)
+				doit=true;
+		} else {
+			final int maxStages = 72; // Needs to be updated by hand if it changes
+			final double multiple = (double)maxStages / cslow;
+			for (int i = 0; i < (cslow-1); i++)
+				if (Math.round((i+1) * multiple) == location) doit = true;
+		}
+		return doit;
+	}
+
+	public DFEVar[][] separate(DFEVector<DFEVar> d) {
+		int s = d.getSize();
+		if (s != 32) throw new RuntimeException("This is not a generic helper function. 32->16 only please");
+		DFEVar[][] data = new DFEVar[2][16];
+
+		for (int i = 0 ; i < 16; i++) {
+			data[0][i] = d[i];
+			data[1][i] = d[i+16];
+		}
+		return data;
+	}
+
+	public DFEVector<DFEVar> combine(DFEVar[][] d) {
+		DFEVector<DFEVar> data = arraytype.newInstance(this);
+		for (int i = 0 ; i < 16; i++) {
+			data[i] <== d[0][i];
+			data[i+16] <== d[1][i];
+		}
+		return data;
+	}
+
+}

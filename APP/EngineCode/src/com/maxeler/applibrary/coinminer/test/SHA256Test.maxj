@@ -1,0 +1,195 @@
+/*********************************************************************
+ * Maxeler Technologies : Hybrid Coin Miner                          *
+ *                                                                   *
+ * Version: 1.0                                                      *
+ * Date:    13th March 2014                                          *
+ *                                                                   *
+ * DFE code source file                                              *
+ *                                                                   *
+ *********************************************************************/
+
+package com.maxeler.applibrary.coinminer.test;
+
+import java.nio.charset.Charset;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.List;
+import java.util.Random;
+
+import com.maxeler.applibrary.coinminer.bitcoinminer.SHA256;
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelConfiguration;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.managers.standard.SimulationManager;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+/**
+ * Unit test for SHA256 implementation.
+ */
+public class SHA256Test extends Kernel {
+	private static DFEType sha256Type = dfeRawBits(256);
+
+	public SHA256Test(KernelParameters params) {
+		super(params);
+
+		DFEVar message512 = io.input("message", dfeRawBits(512));
+
+		DFEVar[] h = new SHA256(this).hashBlock(split(message512));
+		DFEVar hash = h[0] # h[1] # h[2] # h[3] # h[4] # h[5] # h[6] # h[7];
+
+		io.output("hash", hash, sha256Type);
+	}
+
+	private DFEVar[] split(DFEVar m) {
+		DFEVar[] ms = new DFEVar[16];
+		for (int i = 0; i < ms.length; ++i) {
+			ms[i] = m.slice(i * 32, 32).cast(dfeUInt(32));
+		}
+		return ms;
+	}
+
+	/**
+	 * Calculate the bit offset of a message byte in a SHA256 block.
+	 * @param i The index of the message byte (in bytes).
+	 * @return The offset of the byte inside the SHA256 block (in bits).
+	 */
+	private static int bitOffset(int i) {
+		// if the message is considered as 32-bit words then the message data is
+		// encoded using big-endian
+		final int wordIndex = i / 4;
+		final int byteIndex = 3 - i % 4;
+
+		return 32 * wordIndex + 8 * byteIndex;
+	}
+
+	private static Bits[] padToBlockSize(byte[][] values) {
+		Bits padded[] = new Bits[values.length];
+		for(int i = 0; i < values.length; ++i) {
+			padded[i] = padToBlockSize(values[i]);
+		}
+		return padded;
+	}
+
+	private static Bits padToBlockSize(byte[] value) {
+		// as a byte sequence, a padded block looks like:
+		//
+		// m0 m1 m2 ... mn e p0 p1 p2 ... pk L7 L6 L5 L4 L3 L2 L1 L0
+		//
+		// * m0 - mn are the message bytes
+		// * e is the 'end of message' byte (0x80)
+		// * p0 - pk are the padding bytes (0x00)
+		// * L0 - L7 is the message length in bits (L0 is LSB, L7 is MSB)
+		final int messageLength = (value.length + 1) * 8;
+		final int numBlocks = MathUtils.ceilDivide(messageLength + 64, 512);
+		final int blockSize = 512 * numBlocks;
+
+
+		// copy the message contents
+		final Bits padded = new Bits(blockSize);
+		for (int i = 0; i < value.length; ++i)
+			padded.setBits(bitOffset(i), 8, value[i]);
+
+		// set the bit after the message contents
+		padded.setBits(bitOffset(value.length), 8, 0x80);
+
+		// encode message length (note that we assume the message length can fit
+		// in 32 bits so we don't need to set the 32 most significant bits of
+		// the 64-bit word)
+		padded.setBits(blockSize - 32, 32, value.length * 8);
+		padded.setOthers(0);
+
+		return padded;
+	}
+
+	private static final String[] testMessages;
+	private static final byte[][] testOutput;
+	private static final long seed = System.currentTimeMillis();
+	static {
+		int length = 1024;
+		int max = 64-8; // 64 bytes brings us to the limit of 512 bits
+		testMessages = new String[length];
+		testOutput = new byte[length][];
+		System.out.println("Using seed " + seed);
+		Random rand = new Random(seed);
+		for(int i = 0; i < length; ++i) {
+			int size = 1 + rand.nextInt(max-1);
+			String b = "";
+			for(int j = 0; j < size; ++j) {
+				char c =  (char)('a' + rand.nextInt(26));
+				b += c;
+			}
+			testMessages[i] = b;
+			testOutput[i] = hash(b);
+		}
+	}
+
+	private static byte[][] testInput = new byte[testMessages.length][];
+	static {
+		final Charset ascii = Charset.forName("US-ASCII");
+
+		for (int i = 0; i < testInput.length; ++i)
+			testInput[i] = testMessages[i].getBytes(ascii);
+	}
+
+	public static byte[] hash(String password) {
+		try {
+			MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+			byte[] passBytes = password.getBytes();
+			byte[] passHash = sha256.digest(passBytes);
+			return passHash;
+		} catch(NoSuchAlgorithmException e) {
+			throw new RuntimeException(e);
+		}
+	}
+
+	private static boolean areEqual(Bits bits, byte[] bytes) {
+		if (bits.getWidth() != bytes.length * 8)
+			throw new RuntimeException("Number of bits (" + bits.getWidth() + ") is not the same as byte array (" + (bytes.length * 8) + ").");
+
+		for (int i = 0; i < bytes.length; ++i) {
+			if (bits.getBits(bits.getWidth() - (i + 1) * 8, 8) != (bytes[i] & 0xffl))
+				return false;
+		}
+
+		return true;
+	}
+
+	public static void main(String[] args) {
+		SimulationManager sim = new SimulationManager(SHA256Test.class.getSimpleName());
+
+		KernelConfiguration config = sim.getCurrentKernelConfig();
+		config.optimization.setTriAddsEnabled(false);
+		sim.setKernel(new SHA256Test(sim.makeKernelParameters()));
+
+		sim.build();
+
+		sim.setKernelCycles(testInput.length);
+		sim.setInputDataRaw("message", padToBlockSize(testInput));
+		sim.run();
+
+		boolean testPassed = true;
+		List<Bits> hash = sim.getOutputDataRaw("hash");
+		int numError = 0;
+		sim.logInfo("Using seed " + seed);
+		for (int i = 0; i < hash.size(); ++i) {
+			Bits b = hash.get(i);
+
+			//sim.logMsg("hash[%d] = %s", i, b.valueAsHexString());
+
+			if (!areEqual(b, testOutput[i])) {
+				testPassed = false;
+				sim.logError("hash[%d] is incorrect!", i);
+				numError++;
+			}
+			if(numError > 10) {
+				sim.logError("Too many errors. Stop reporting");
+				throw new RuntimeException();
+			}
+		}
+
+		sim.logMsg("Test %s!", testPassed ? "passed" : "failed");
+	}
+}

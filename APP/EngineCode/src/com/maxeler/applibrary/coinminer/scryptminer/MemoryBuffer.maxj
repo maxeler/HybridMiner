@@ -1,0 +1,52 @@
+/*********************************************************************
+ * Maxeler Technologies : Hybrid Coin Miner                          *
+ *                                                                   *
+ * Version: 1.0                                                      *
+ * Date:    13th March 2014                                          *
+ *                                                                   *
+ * DFE code source file                                              *
+ *                                                                   *
+ *********************************************************************/
+
+package com.maxeler.applibrary.coinminer.scryptminer;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelLib;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmInput;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmOutput;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmSinglePortRAM;
+import com.maxeler.maxcompiler.v2.statemachine.Latency;
+import com.maxeler.maxcompiler.v2.statemachine.kernel.KernelStateMachine;
+import com.maxeler.maxcompiler.v2.statemachine.stdlib.Mem.SinglePortRAMMode;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+public class MemoryBuffer extends KernelStateMachine {
+
+	private final DFEsmInput address, data_in, write_en;
+	private final DFEsmOutput data_out;
+	private final int addrBits;
+	private final DFEsmSinglePortRAM ram;
+	protected MemoryBuffer(KernelLib owner, int dataWidth, int depth) {
+		super(owner);
+
+		addrBits = MathUtils.bitsToAddress(depth);
+		address = io.input("address", dfeUInt(addrBits));
+		data_in = io.input("data_in", dfeUInt(dataWidth));
+		write_en = io.input("write_en", dfeUInt(1));
+		data_out = io.output("data_out", dfeUInt(dataWidth), 1);
+
+		ram = mem.ram(dfeUInt(dataWidth), depth, SinglePortRAMMode.WRITE_FIRST, Latency.ONE_CYCLE);
+	}
+
+	@Override
+	protected void nextState() {
+		ram.address <== address;
+		ram.dataIn <== data_in;
+		ram.writeEnable <== write_en;
+	}
+
+	@Override
+	protected void outputFunction() {
+		data_out <== ram.dataOut;
+	}
+
+}

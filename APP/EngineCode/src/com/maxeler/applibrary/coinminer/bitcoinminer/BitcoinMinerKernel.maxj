@@ -1,0 +1,324 @@
+/*********************************************************************
+ * Maxeler Technologies : Hybrid Coin Miner                          *
+ *                                                                   *
+ * Version: 1.0                                                      *
+ * Date:    13th March 2014                                          *
+ *                                                                   *
+ * DFE code source file                                              *
+ *                                                                   *
+ *********************************************************************/
+
+package com.maxeler.applibrary.coinminer.bitcoinminer;
+
+import static com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEStructType.sft;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import com.maxeler.applibrary.coinminer.HybridMinerEngineParameters;
+import com.maxeler.applibrary.coinminer.bitcoinminer.SHA256.Optimizations;
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Mem.RamPortMode;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Mem.RamPortParams;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Mem.RamWriteMode;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.KernelObject;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEStruct;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEStructType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.utils.Bits;
+import com.maxeler.maxjlibs.io.MultiScalarInputs;
+import com.maxeler.maxjlibs.utils.SliceAssigner;
+
+
+/**
+ * The kernel operates in two phases.  In the first phase, computation is
+ * performed; each pipe computes hashes for a subset of the specified nonce
+ * space.  Matches are recorded into per-pipe RAMs.  In the second phase,
+ * these results are read out of the RAMs and sent back to the host.  This is
+ * all managed by a simple kernel state-machine.
+ *
+ */
+public class BitcoinMinerKernel extends Kernel {
+
+	private static final DFEType TYPE_NONCE = dfeUInt(32);
+	private static final int PCIE_WIDTH = 128;
+
+	/** Type recorded in per-pipe RAMs. */
+	private static final DFEStructType TYPE_RECORD = new DFEStructType(
+			sft("nonce", TYPE_NONCE),
+			sft("match", dfeBool())
+	);
+
+
+
+	/** Constant bits of the second block of the first hash */
+	private static final Bits HASH1_BITS;
+	static {
+		HASH1_BITS = new Bits(384);
+		/* First bit after the message is always 1 */
+		HASH1_BITS.setBits(3*8, 8, 0x80);
+		/* Last 64 bits are the number of bits in the message */
+		HASH1_BITS.setBits(384-32, 32, 640);
+		/* Padding to 512 bits */
+		HASH1_BITS.setOthers(0);
+	}
+
+	/** Constant bits of the single block of the second hash */
+	private static final Bits HASH2_BITS;
+	static {
+		HASH2_BITS = new Bits(256);
+		/* First bit after the message is always 1 */
+		HASH2_BITS.setBits(3*8, 8, 0x80);
+		/* Last 64 bits are the number of bits in the message */
+		HASH2_BITS.setBits(256-32, 32, 256);
+		/* Padding to 512 bits */
+		HASH2_BITS.setOthers(0);
+	}
+
+
+	private class WorkItem {
+		final DFEVar target     = MultiScalarInputs.input(BitcoinMinerKernel.this, "target", dfeRawBits(256)).slice(0, 224).cast(dfeUInt(224));
+		final DFEVar midstate    = MultiScalarInputs.input(BitcoinMinerKernel.this, "midstate", dfeRawBits(256));
+		final DFEVar hashInitial = MultiScalarInputs.input(BitcoinMinerKernel.this, "hash1block2", dfeRawBits(96));
+	}
+
+
+	private final HybridMinerEngineParameters params;
+	private final Control.Outputs ctrl;
+	private final SHA256 sha256;
+
+
+	/**
+	 * Constructor.
+	 */
+	public BitcoinMinerKernel(KernelParameters kernelParams, HybridMinerEngineParameters params) {
+		super(kernelParams);
+		this.params = params;
+		this.ctrl = new Control(this, params.getNumPipes(), params.getNumRecordsPerPipe()).outputs;
+		this.sha256 = new SHA256(this, new Optimizations(params.isSingleCycle()));
+
+		WorkItem wi = new WorkItem();
+
+		List<DFEStruct> records = new ArrayList<DFEStruct>();
+
+		for (int p = 0; p < params.getNumPipes(); p++) {
+			pushGroup("Miner_" + p);
+			if (params.useConstraints()) {
+				optimization.setGroupClockRegionAreaConstraint(0, p*4, 1, p*4+3);
+			}
+
+			DFEVar nonce = ctrl.nonce + p;
+
+			DFEVar match = findMatches(wi, nonce, p);
+
+			records.add(recordMatches(match, nonce));
+
+			popGroup();
+		}
+
+		DFEStruct output = mux(ctrl.iPipe, records);
+		io.output("output", dfeRawBits(PCIE_WIDTH), ctrl.enOutput) <== zeropad(output, PCIE_WIDTH);
+	}
+
+
+
+	/**
+	 * Do the actual computation of hashes, and find outputs that match the
+	 * target.
+	 */
+	private DFEVar findMatches(WorkItem wi, DFEVar nonce, int p) {
+		DFEVar hash1 = computeHash1(wi.midstate, wi.hashInitial, nonce, p);
+		DFEVar hash2 = computeHash2(hash1, p);
+		hash2 = reorderHash(hash2);
+		return calcMatch(nonce, hash2, wi.target);
+	}
+
+
+
+	/**
+	 * Record matches into a RAM.
+	 */
+	private DFEStruct recordMatches(DFEVar match, DFEVar nonce) {
+		DFEVar enWrite = match & ctrl.enCompute;
+
+		DFEVar iWrite = control.count.makeCounterChain(enWrite)
+				.addCounter(params.getNumRecordsPerPipe(), 1);
+
+		DFEVar addr = ctrl.enCompute ? iWrite : ctrl.iRead;
+
+		RamPortParams<DFEVar> rpp = mem.makeRamPortParams(RamPortMode.READ_WRITE, addr, TYPE_NONCE)
+				.withDataIn(nonce)
+				.withWriteEnable(enWrite);
+
+		DFEStruct record = TYPE_RECORD.newInstance(this);
+		record["match"] <== ctrl.iRead < iWrite;
+		record["nonce"] <== mem.ram(params.getNumRecordsPerPipe(), RamWriteMode.READ_FIRST, rpp);
+		return record;
+	}
+
+
+	/**
+	 * Compute the hash of a bitcoin block.
+	 * The size of the padded bitcoin block is 1024 bits. The hash of the first
+	 * 512-bit is pre-computed ({@code midstate}).
+	 * @param midstate		Hash of the first 512-bit block
+	 * @param block2Start	Variable part of the second 512-bit block (96 bits)
+	 * @param nonce			Nonce (32 bits)
+	 * @return	The first hash
+	 */
+	private DFEVar computeHash1(DFEVar midstate, DFEVar block2Start, DFEVar nonce, int p) {
+		pushGroup("SHAcore_" + p + "_0");
+
+		DFEVar[] block = splitAndCat32(
+				constant.var(dfeRawBits(384), HASH1_BITS),
+				byteSwap32(nonce),
+				block2Start);
+
+		DFEVar[] hash = sha256.hashBlock(block, split32(midstate));
+
+		popGroup();
+		return DFEVectorType.newInstance(hash).pack();
+	}
+
+
+	/**
+	 * Compute the hash of the hash of a bitcoin block.
+	 * @param hash1	Hash of bitcoin block
+	 * @return	The second hash
+	 */
+	private DFEVar computeHash2(DFEVar hash1, int p) {
+		pushGroup("SHAcore_" + p + "_1");
+
+		DFEVar[] block = splitAndCat32(
+				constant.var(dfeRawBits(256), HASH2_BITS),
+				hash1);
+
+		DFEVar[] hash2 = sha256.hashBlock(block);
+
+		popGroup();
+		return DFEVectorType.newInstance(hash2).pack();
+	}
+
+
+	/**
+	 * Byte-swap on a 32-bit basis.
+	 */
+	protected DFEVar reorderHash(DFEVar input) {
+		SliceAssigner<DFEVar> slicer = new SliceAssigner<DFEVar>(this, dfeUInt(256));
+		for (int w = 0; w < 8; w++) {	// 8 words of 32 bits
+			slicer.setBits(w*32, 32, byteSwap32(input.slice(w*32, 32)));
+		}
+		return slicer.merge();
+	}
+
+
+	/**
+	 * Swap the bytes of a 32-bit type.
+	 */
+	protected DFEVar byteSwap32(DFEVar input) {
+		DFEVar retval = input.slice(0, 8) # input.slice(8, 8) # input.slice(16, 8) # input.slice(24, 8);
+		return retval.cast(input.getType());
+	}
+
+
+	/**
+	 * Calculate whether there was a match against the target, and record the
+	 * corresponding nonce.
+	 *
+	 * A match corresponds to the computed hash being less than the target
+	 * value.  Although these are 256-bit quantities, we know that the 32 msbs
+	 * are all-zero, so we can reduce the amount of logic used here.
+	 */
+	private DFEVar calcMatch(DFEVar nonce, DFEVar hash2, DFEVar target) {
+		DFEVar m1 = ltPipelined(hash2.slice(0, 224), target);
+		DFEVar m2 = hash2.slice(224, 32) === 0;
+		return (m1 & m2);
+	}
+
+
+	/**
+	 * A 224-bit comparison is huge, and is not currently auto-pipelined
+	 * by MaxCompiler.  Therefore we do it manually, by breaking it into
+	 * a bunch of 16-bit comparisons, and chaining the results.  This isn't
+	 * particularly resource-efficient, but it doesn't really matter.
+	 */
+	private DFEVar ltPipelined(DFEVar a, DFEVar b) {
+		final int B = 16;
+		final int N = a.getType().getTotalBits();
+		if (N < B) {
+			throw new RuntimeException("Size must be a multiple of " + B);
+		} else if (N == B) {
+			return (a < b);
+		} else {
+			DFEVar aHi = a.slice(N-B, B).cast(dfeUInt(B));
+			DFEVar bHi = b.slice(N-B, B).cast(dfeUInt(B));
+			DFEVar aLo = a.slice(0, N-B).cast(dfeUInt(N-B));
+			DFEVar bLo = b.slice(0, N-B).cast(dfeUInt(N-B));
+			return (aHi < bHi) | ((aHi === bHi) & ltPipelined(aLo, bLo));
+		}
+	}
+
+
+	public <T extends KernelObject<T>>
+	T mux(DFEVar select, List<T> inputs) {
+		return (inputs.size() == 1) ? inputs[0] : control.mux(select, inputs);
+	}
+
+
+	/**
+	 * Split to an arrary of 32-bit words, and then concatenate.
+	 */
+	private DFEVar[] splitAndCat32(DFEVar... items) {
+		final int N = items.length;
+		DFEVar[][] s = new DFEVar[N][];
+		for (int i = 0; i < N; i++) {
+			s[i] = split32(items[i]);
+		}
+		return cat(s);
+	}
+
+
+	/**
+	 * Concatenate arrays.
+	 */
+	private DFEVar[] cat(DFEVar[]... arrays) {
+		int N = 0;
+		for (int i = 0; i < arrays.length; i++) {
+			N += arrays[i].length;
+		}
+
+		DFEVar[] y = new DFEVar[N];
+		int c = 0;
+		for (int i = arrays.length-1; i >= 0; i--) {
+			for (int j = 0; j < arrays[i].length; j++) {
+				y[c++] = arrays[i][j];
+			}
+		}
+		return y;
+	}
+
+	/**
+	 * Split a DFEVar into an array of dfeUInt(32).
+	 */
+	private DFEVar[] split32(DFEVar a) {
+		final int B = 32;
+		DFEVar[] ret = new DFEVar[a.getType().getTotalBits() / B];
+		for (int i = 0; i < ret.length; ++i) {
+			ret[i] = a.slice(i * B, B).cast(dfeUInt(B));
+		}
+		return ret;
+	}
+
+
+	/**
+	 * Zero-pads up to a specified size (padding msbs).
+	 */
+	private <T extends KernelObject<T>>
+	DFEVar zeropad(T x, int num) {
+		return dfeRawBits(num - x.getType().getTotalBits()).newInstance(this, 0) # x.pack();
+	}
+
+}

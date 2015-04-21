@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<maxCompilerManager version="2">
+<enginePart internalEngineSubproject="Hybrid-Coinminer_EngineCode" isSrcBin="false" isUseDefaultSelected="false" outputLocation="/Hybrid-Coinminer_EngineCode/bin" projectName="Hybrid-Coinminer"/>
+<cpuPart internalCpuSubproject="Hybrid-Coinminer_CPUCode"/>
+<watchedFiles/>
+</maxCompilerManager>

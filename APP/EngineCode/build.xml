@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<project basedir="." default="maxj-compile" name="bitstream">
+	<property environment="env"/>
+	<property name="debuglevel" value="source,lines,vars"/>
+	<property name="target" value="1.6"/>
+	<property name="source" value="1.6"/>
+
+
+	<condition property="maxeda.classpath" value="${env.MAXCOMPILERDIR}/lib/MaxCompiler.jar">
+		<not>
+			<isset property="env.MAXCOMPILERJCP"/>
+		</not>
+	</condition>
+
+	<condition property="maxeda.classpath" value="${env.MAXCOMPILERJCP}">
+		<isset property="env.MAXCOMPILERJCP"/>
+	</condition>
+
+	<condition property="maxgenfd.classpath" value="${env.MAXGENFDDIR}/lib/MaxGenFD.jar">
+		<not>
+			<isset property="env.MAXGENFDJCP"/>
+		</not>
+	</condition>
+
+	<condition property="maxgenfd.classpath" value="${env.MAXGENFDJCP}">
+		<isset property="env.MAXGENFDJCP"/>
+	</condition>
+
+    <path id="maxq.classpath">
+        <pathelement location="/network-raid/opt/maxq/maxq-mgr.jar"/>
+        <pathelement location="/network-raid/opt/maxq/maxq-worker.jar"/>
+        <pathelement location="/network-raid/opt/maxq/maxq-ctl.jar"/>
+    </path>
+
+	<path id="bitstream.classpath">
+		<pathelement location="bin"/>
+        <pathelement location="/home/arnaud/tmp_co/MaxBITS/maxjbits/bin"/>
+		<pathelement location="${maxeda.classpath}"/> 
+		<pathelement location="${maxgenfd.classpath}"/> 
+		<path refid="maxq.classpath"/>
+	</path>
+
+	<target name="init">
+		<mkdir dir="bin"/>
+		<copy includeemptydirs="false" todir="bin">
+			<fileset dir="src">
+				<exclude name="**/*.launch"/>
+				<exclude name="**/*.java"/>
+				<exclude name="**/*.maxj"/>
+			</fileset>
+		</copy>
+	</target>
+
+	<target name="clean">
+		<delete dir="bin"/>
+	</target>
+
+	<taskdef name="maxjcompiler" classname="org.eclipse.jdt.core.ant.taskdef.MaxjTask" classpath="${env.MAXCOMPILERDIR}/lib/MaxIDE/ecj.jar"/> 
+
+	<target name="maxj-compile" depends="init">
+		<echo message="${ant.project.name}: ${ant.file}"/>
+		<echo message="MAXCOMPILERDIR: ${env.MAXCOMPILERDIR}"/>
+		<echo message="Maxeda: ${maxeda.classpath}"/>
+		<maxjcompiler destdir="bin" debug="true" debuglevel="${debuglevel}" source="${source}" target="${target}">
+			<src path="src"/>
+			<classpath refid="bitstream.classpath"/>
+		</maxjcompiler>
+	</target>
+
+	<target name="build-hw" depends="maxj-compile">
+		<java classname="com.maxeler.applibrary.bitcoinminer.BitcoinBuilder" failonerror="true" fork="yes">
+			<classpath refid="bitstream.classpath"/>
+		</java>
+	</target>
+
+	<target name="build-sim" depends="maxj-compile">
+		<java classname="com.maxeler.applibrary.bitcoinminer.BitcoinMinerBuilder" failonerror="true" fork="yes">
+			<classpath refid="bitstream.classpath"/>
+			<arg value="enableSimulation=true"/>
+		</java>
+	</target>
+
+	<target name="maxj-sim" depends="maxj-compile">
+		<java classname="com.maxeler.applibrary.bitcoinminer.BitcoinMinerTest" failonerror="true" fork="yes">
+			<classpath refid="bitstream.classpath"/>
+		</java>
+	</target>
+
+</project>

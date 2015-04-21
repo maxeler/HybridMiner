@@ -1,0 +1,111 @@
+/*********************************************************************
+ * Maxeler Technologies : Hybrid Coin Miner                          *
+ *                                                                   *
+ * Version: 1.0                                                      *
+ * Date:    13th March 2014                                          *
+ *                                                                   *
+ * DFE code source file                                              *
+ *                                                                   *
+ *********************************************************************/
+
+package com.maxeler.applibrary.coinminer.scryptminer;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelLib;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmOutput;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmStateEnum;
+import com.maxeler.maxcompiler.v2.statemachine.DFEsmStateValue;
+import com.maxeler.maxcompiler.v2.statemachine.kernel.KernelStateMachine;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+
+public class ScryptControl extends KernelStateMachine {
+
+	enum MainStates { IO, COMPUTE};
+	enum IOStates { INPUT, OUTPUT};
+	private final DFEsmStateEnum<MainStates> mainstate;
+	private final DFEsmStateEnum<IOStates> iostate;
+	private final DFEsmStateValue idx_phase;
+	private final DFEsmStateValue idx_iter;
+	private final DFEsmStateValue idx_cslow;
+	private final DFEsmStateValue idx_io;
+
+	private final DFEsmOutput out_phase, out_iter, out_cslow, out_ioidx, out_readin, out_writeout;
+	private final int iters, cslow, iocycles;
+	protected ScryptControl(KernelLib owner, int iters, int cslow, int iocycles) {
+		super(owner);
+		this.iters = iters; this.cslow = cslow; this.iocycles = iocycles;
+
+		mainstate = state.enumerated(MainStates.class, MainStates.IO);
+		iostate = state.enumerated(IOStates.class, IOStates.INPUT);
+		idx_phase = state.value(dfeUInt(1), 0);
+		idx_iter = state.value(dfeUInt(MathUtils.bitsToAddress(iters)), 0);
+		idx_cslow = state.value(dfeUInt(MathUtils.bitsToAddress(cslow)), 0);
+		idx_io = state.value(dfeUInt(4), 0);
+
+		out_phase = io.output("phase_idx", dfeUInt(1));
+		out_iter =  io.output("iter_idx", idx_iter.getType());
+		out_cslow = io.output("cslow_idx", idx_cslow.getType());
+		out_ioidx = io.output("io_idx", idx_io.getType());
+		out_readin = io.output("readin", dfeUInt(1));
+		out_writeout = io.output("writeout", dfeUInt(1));
+	}
+
+
+	@Override
+	protected void nextState() {
+		SWITCH(mainstate) {
+			CASE (MainStates.IO) {
+				IF (idx_io.eq(iocycles-1)) {
+					IF(idx_cslow.eq(cslow-1)) {
+						IF (iostate.eq(IOStates.INPUT)) {
+							mainstate.next <== MainStates.COMPUTE;
+							idx_phase.next <== 0;
+							idx_iter.next <== 0;
+						} ELSE {
+							mainstate.next <== MainStates.IO;
+							iostate.next <== IOStates.INPUT;
+						}
+						idx_io.next <== 0;
+						idx_cslow.next <== 0;
+					} ELSE {
+						idx_cslow.next <== idx_cslow + 1;
+						idx_io.next <== 0;
+					}
+				} ELSE {
+					idx_io.next <== idx_io+1;
+				}
+			}
+			CASE (MainStates.COMPUTE) {
+				IF (idx_cslow.eq(cslow-1)) {
+					idx_cslow.next <== 0;
+					IF (idx_iter.eq(iters-1)) {
+						idx_iter.next <== 0;
+						IF(idx_phase.eq(1)) {
+							mainstate.next <== MainStates.IO;
+							iostate.next <== IOStates.OUTPUT;
+							idx_io.next <== 0;
+						} ELSE {
+							idx_phase.next <== idx_phase+1;
+						}
+					} ELSE {
+						idx_iter.next <== idx_iter+1;
+					}
+				} ELSE {
+					idx_cslow.next <== idx_cslow + 1;
+				}
+			}
+		}
+	}
+
+	@Override
+	protected void outputFunction() {
+		out_phase <== idx_phase;
+		out_iter <==  idx_iter;
+		out_cslow <== idx_cslow;
+		out_ioidx <== idx_io;
+		out_readin <== (mainstate.eq(MainStates.IO) & iostate.eq(IOStates.INPUT));
+		out_writeout <== (mainstate.eq(MainStates.IO) & iostate.eq(IOStates.OUTPUT));
+		debug.printf("SM. mainstate=%d, iostate=%d, phase=%d, iter=%d, cslow=%d. ioidx=%d\n", mainstate, iostate, idx_phase, idx_iter, idx_cslow, idx_io);
+	}
+}
+

@@ -1,0 +1,139 @@
+/*********************************************************************
+ * Maxeler Technologies : Hybrid Coin Miner                          *
+ *                                                                   *
+ * Version: 1.0                                                      *
+ * Date:    13th March 2014                                          *
+ *                                                                   *
+ * DFE code source file                                              *
+ *                                                                   *
+ *********************************************************************/
+
+package com.maxeler.applibrary.coinminer;
+
+import com.maxeler.maxcompiler.v2.build.EngineParameters;
+import com.maxeler.maxcompiler.v2.managers.DFEModel;
+
+/**
+ * Engine parameters for the Bitcoin Miner
+ *
+ * @see EngineParameters
+ */
+public class HybridMinerEngineParameters extends EngineParameters {
+
+	private static final String isBuffGce            = "isBuffGce";
+	private static final String isMultiCycleReset    = "isMultiCycleReset";
+	private static final String CEReplication        = "CEReplication";
+	private static final String MPPRContinue 		 = "MPPRContinue";
+	private static final String streamFrequency      = "streamFrequency";
+	private static final String numPipes             = "numPipes";
+	private static final String numRecordsPerPipe    = "numRecordsPerPipe";
+	private static final String tag                  = "tag";
+	private static final String hasStreamStatus      = "hasStreamStatus";
+	private static final String isPhaseClocks        = "isPhaseClocks";
+	private static final String triAdds              = "triAdds";
+	private static final String fifoThreshold		 = "FIFOThreshold";
+	private static final String isSingleCycle        = "isSingleCycle";
+	private static final String useConstraints       = "useConstraints";
+
+	public HybridMinerEngineParameters(String[] argv) {
+		super(argv);
+	}
+
+	public HybridMinerEngineParameters(String[] argv, String... staticOverrides) {
+		super(argv, staticOverrides);
+	}
+
+	public boolean getMPPRContinue()        { return getParam(MPPRContinue); }
+	public boolean getIsBuffGce()           { return getParam(isBuffGce); }
+	public boolean getIsMultiCycleReset()   { return getParam(isMultiCycleReset); }
+	public int getCEReplication()           { return getParam(CEReplication); }
+	public int getStreamFrequency()         { return getParam(streamFrequency); }
+	public int getNumPipes()                { return getParam(numPipes); }
+	public int getNumRecordsPerPipe()       { return getParam(numRecordsPerPipe); }
+	public String getTag()                  { return getParam(tag); }
+	public boolean getHasStreamStatus()     { return getParam(hasStreamStatus); }
+	public boolean getIsPhaseClocks()       { return getParam(isPhaseClocks); }
+	public boolean getTriAdds()             { return getParam(triAdds); }
+	public int getFifoThreshold()           { return getParam(fifoThreshold); }
+	public boolean useConstraints()         { return getParam(useConstraints); }
+	public boolean isSingleCycle()          { return getParam(isSingleCycle); }
+
+	public int getScryptNumPipes() {
+		return getParam("scrypt_numpipes");
+	}
+
+	public int getBitcoinFreq() {
+		return getParam(streamFrequency);
+	}
+
+	public int getScryptFreq() {
+		return getParam("scrypt_freq");
+	}
+
+
+	public int getCslow() {
+		return getParam("scrypt_cslow");
+	}
+
+	@Override
+	protected void declarations() {
+		/* Standard parameters */
+
+		// Mandatory params
+		declareParam(s_parameterMaxFileName,        DataType.STRING,              "HybridcoinMiner");
+		declareParam(s_parameterTarget,             Target.class,                 Target.DFE);
+		declareParam(s_parameterDFE,                DataType.DFEMODEL,            DFEModel.VECTIS);
+
+		// naming
+		declareParam(tag,               DataType.STRING, "");
+
+		// build parameters
+		declareParam(MPPRContinue,      DataType.BOOL, false);
+		declareParam(CEReplication,     DataType.INT, 6);
+		declareParam(isBuffGce,         DataType.BOOL, false);
+		declareParam(isMultiCycleReset, DataType.BOOL, true);
+		declareParam(isPhaseClocks,     DataType.BOOL, false);
+		declareParam(fifoThreshold,     DataType.INT, 0);
+		declareParam(isSingleCycle,     DataType.BOOL, true);
+		declareParam(useConstraints,    DataType.BOOL, false);
+
+		// common kernel parameters
+		declareParam(streamFrequency,   DataType.INT, 150);
+		declareParam(numPipes,          DataType.INT, 1);
+		declareParam(numRecordsPerPipe, DataType.INT, 8);
+
+		// for debugging
+		declareParam(hasStreamStatus,   DataType.BOOL, false);
+
+		/* Specific parameters */
+		declareParam(triAdds,           DataType.BOOL, false);
+
+		declareParam("scrypt_cslow", DataType.INT, 4);
+		declareParam("scrypt_numpipes", DataType.INT, 1);
+		declareParam("scrypt_freq", DataType.INT, 20);
+	}
+
+	@Override
+	protected void validate() {
+
+	}
+
+	@Override
+	public String getBuildName() {
+		return getMaxFileName()
+				+ "_" + getDFEModel()
+				+ "_" + getTarget()
+				+ "_BC" + getNumPipes() + "P"
+				+ "_S" + getScryptNumPipes() + "P"
+				+ simFilter("_main" + getStreamFrequency() + "MHz")
+				+ "_scryptFreq" + getScryptFreq() + "MHz"
+				+ "_cslow" + getCslow()
+				+ ((getTag().length() == 0) ? "" : ("_" + getTag()));
+	}
+
+
+	private String simFilter(String str) {
+		return (getTarget() == Target.DFE_SIM) ? "" : str;
+	}
+
+}
