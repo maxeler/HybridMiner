@@ -20,7 +20,7 @@
 				<isset property="args"/>
 			</not>
 		</condition>
-	<java classname="com.maxeler.applibrary.bitcoinminer.HybridMinerManager" fork="true" failonerror="true">
+	<java classname="com.maxeler.applibrary.coinminer.HybridMinerManager" fork="true" failonerror="true">
 			<env key="MAXSOURCEDIRS" value="src"/>
 		<jvmarg value="-Xmx2048m"/>
 		<arg line="${args}" />
@@ -41,7 +41,7 @@
 		</copy>
 	<jar destfile="HybridMinerManager.jar" basedir="../RunRules/Simulation/dist/jar">
 			<manifest>
-				<attribute name="Main-Class" value="com.maxeler.applibrary.bitcoinminer.HybridMinerManager"/>
+				<attribute name="Main-Class" value="com.maxeler.applibrary.coinminer.HybridMinerManager"/>
 			</manifest>
 		</jar>
 	</target>
